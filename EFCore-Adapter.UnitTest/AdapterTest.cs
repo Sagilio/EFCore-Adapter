@@ -1,77 +1,96 @@
-﻿using NetCasbin;
-using Xunit;
-using Casbin.NET.Adapter.EFCore;
-using Microsoft.EntityFrameworkCore;
-using System;
+﻿using System;
 using System.Linq;
+using System.Threading.Tasks;
+using Casbin.NET.Adapter.EFCore;
+using EFCore_Adapter.UnitTest.Fixtures;
+using Microsoft.EntityFrameworkCore;
+using NetCasbin;
+using Xunit;
 
-namespace EFCore_Adapter.Test
+namespace EFCore_Adapter.UnitTest
 {
-    public class AdapterTest : TestUtil, IDisposable
+    public class AdapterTest : TestUtil,IClassFixture<ModelProvideFixture>, IDisposable
     {
-        public CasbinDbContext<int> _context { get; set; }
+        private readonly ModelProvideFixture _modelProvideFixture;
+        private readonly CasbinDbContext<int> _context;
+        private readonly CasbinDbContext<int> _asyncContext;
 
-        public AdapterTest()
+        public AdapterTest(ModelProvideFixture modelProvideFixture)
         {
+            _modelProvideFixture = modelProvideFixture;
             var options = new DbContextOptionsBuilder<CasbinDbContext<int>>()
                 .UseSqlite("Data Source=casbin_test.sqlite3")
                 .Options;
 
+            var asyncOptions = new DbContextOptionsBuilder<CasbinDbContext<int>>()
+                .UseSqlite("Data Source=casbin_async_test.sqlite3")
+                .Options;
+
             _context = new CasbinDbContext<int>(options);
             _context.Database.EnsureCreated();
-            InitPolicy();
+            _asyncContext = new CasbinDbContext<int>(asyncOptions);
+            _asyncContext.Database.EnsureCreated();
+
+            InitPolicy(_context);
+            InitPolicy(_asyncContext);
         }
 
         public void Dispose()
         {
-            _context.RemoveRange(_context.CasbinRule);
-            _context.SaveChanges();
+            Dispose(_context);
+            Dispose(_asyncContext);
         }
 
-        private void InitPolicy()
+        private void Dispose(CasbinDbContext<int> context)
         {
-            _context.CasbinRule.Add(new CasbinRule<int>()
+            context.RemoveRange(context.CasbinRule);
+            context.SaveChanges();
+        }
+
+        private static void InitPolicy(CasbinDbContext<int> context)
+        {
+            context.CasbinRule.Add(new CasbinRule<int>()
             {
                 PType = "p",
                 V0 = "alice",
                 V1 = "data1",
                 V2 = "read",
             });
-            _context.CasbinRule.Add(new CasbinRule<int>()
+            context.CasbinRule.Add(new CasbinRule<int>()
             {
                 PType = "p",
                 V0 = "bob",
                 V1 = "data2",
                 V2 = "write",
             });
-            _context.CasbinRule.Add(new CasbinRule<int>()
+            context.CasbinRule.Add(new CasbinRule<int>()
             {
                 PType = "p",
                 V0 = "data2_admin",
                 V1 = "data2",
                 V2 = "read",
             });
-            _context.CasbinRule.Add(new CasbinRule<int>()
+            context.CasbinRule.Add(new CasbinRule<int>()
             {
                 PType = "p",
                 V0 = "data2_admin",
                 V1 = "data2",
                 V2 = "write",
             });
-            _context.CasbinRule.Add(new CasbinRule<int>()
+            context.CasbinRule.Add(new CasbinRule<int>()
             {
                 PType = "g",
                 V0 = "alice",
                 V1 = "data2_admin",
             });
-            _context.SaveChanges();
+            context.SaveChanges();
         }
 
         [Fact]
-        public void Test_Adapter_AutoSave()
+        public void TestAdapterAutoSave()
         {
             var efAdapter = new CasbinDbAdapter<int>(_context);
-            Enforcer e = new Enforcer("examples/rbac_model.conf", efAdapter);
+            var e = new Enforcer(_modelProvideFixture.GetRbacModel(), efAdapter);
 
             TestGetPolicy(e, AsList(
                 AsList("alice", "data1", "read"),
@@ -106,6 +125,47 @@ namespace EFCore_Adapter.Test
                 AsList("bob", "data2", "write")
             ));
             Assert.True(_context.CasbinRule.Count() == 3);
+        }
+
+        [Fact]
+        public async Task TestAdapterAutoSaveAsync()
+        {
+            var efAdapter = new CasbinDbAdapter<int>(_asyncContext);
+            var e = new Enforcer(_modelProvideFixture.GetRbacModel(), efAdapter);
+
+            TestGetPolicy(e, AsList(
+                AsList("alice", "data1", "read"),
+                AsList("bob", "data2", "write"),
+                AsList("data2_admin", "data2", "read"),
+                AsList("data2_admin", "data2", "write")
+            ));
+            Assert.True(_asyncContext.CasbinRule.Count() == 5);
+
+            await e.AddPolicyAsync("alice", "data1", "write");
+            TestGetPolicy(e, AsList(
+                AsList("alice", "data1", "read"),
+                AsList("bob", "data2", "write"),
+                AsList("data2_admin", "data2", "read"),
+                AsList("data2_admin", "data2", "write"),
+                AsList("alice", "data1", "write")
+            ));
+            Assert.True(_asyncContext.CasbinRule.Count() == 6);
+
+            await e.RemovePolicyAsync("alice", "data1", "write");
+            TestGetPolicy(e, AsList(
+                AsList("alice", "data1", "read"),
+                AsList("bob", "data2", "write"),
+                AsList("data2_admin", "data2", "read"),
+                AsList("data2_admin", "data2", "write")
+            ));
+            Assert.True(_asyncContext.CasbinRule.Count() == 5);
+
+            await e.RemoveFilteredPolicyAsync(0, "data2_admin");
+            TestGetPolicy(e, AsList(
+                AsList("alice", "data1", "read"),
+                AsList("bob", "data2", "write")
+            ));
+            Assert.True(_asyncContext.CasbinRule.Count() == 3);
         }
     }
 }
